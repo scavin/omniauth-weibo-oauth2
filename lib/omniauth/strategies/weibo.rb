@@ -85,13 +85,21 @@ module OmniAuth
       #
       def authorize_params
         super.tap do |params|
-          %w[display with_offical_account forcelogin state].each do |v|
+          %w[display with_offical_account forcelogin].each do |v|
             if request.params[v]
               params[v.to_sym] = request.params[v]
             end
-            session["omniauth.state"] = params[v.to_sym] if v == 'state'
           end
+          # Ensure state parameter is properly set for CSRF protection
+          session['omniauth.state'] = params[:state] = SecureRandom.hex(24)
         end
+      end
+
+      def request_phase
+        if request.request_method != 'POST' && !OmniAuth.config.silence_get_warning
+          raise OmniAuth::NoSessionError.new("HTTP GET is not allowed for OmniAuth requests. See https://github.com/omniauth/omniauth/wiki/Resolving-CVE-2015-9284")
+        end
+        super
       end
 
       protected
@@ -103,9 +111,24 @@ module OmniAuth
           'grant_type'    => 'authorization_code',
           'redirect_uri'  => callback_url
           }.merge(token_params.to_hash(symbolize_keys: true))
-        client.get_token(params, deep_symbolize(options.token_params))
+        begin
+          client.get_token(params, deep_symbolize(options.token_params))
+        rescue ::OAuth2::Error => e
+          raise OmniAuth::Strategies::OAuth2::Error.new(e)
+        rescue ::Timeout::Error, ::Errno::ETIMEDOUT => e
+          raise OmniAuth::Strategies::OAuth2::Error.new(e)
+        end
       end
 
+      def callback_phase
+        super
+      rescue ::OAuth2::Error => e
+        fail!(:invalid_credentials, e)
+      rescue ::Timeout::Error, ::Errno::ETIMEDOUT => e
+        fail!(:timeout, e)
+      rescue ::SocketError => e
+        fail!(:failed_to_connect, e)
+      end
     end
   end
 end
